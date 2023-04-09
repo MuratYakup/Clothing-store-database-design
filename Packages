@@ -1,0 +1,226 @@
+create or replace package body PKG_PRODUCT is
+
+  /*Ürünler tablosuna t_ürün tipindeki parametreleri ve eklenecegi kategoriyi belirledikten sonra
+  gerekli kontrollerin devaminda verilen veriyi ekleme islemini yapar */
+  PROCEDURE prc_ürün_ekleme(p_kategori_ad varchar2, p_ürün t_ürün) IS
+    v_kategoriId  NUMBER;
+    v_altKategori NUMBER;
+  BEGIN
+    -- Kategori ve Alt Kategori Seçimi
+  
+    v_kategoriId  := pkg_controls.fnc_kategori_kontrol(p_kategori_ad);
+    v_altKategori := pkg_controls.fnc_altkategori_kontrol(v_kategoriId,
+                                                          p_ürün.altkategoriId);
+  
+    if v_kategoriId is null then
+    
+      raise_application_error(-20004, 'Bu isme sahip kategori bulunamadi');
+    else
+      v_kategoriId := pkg_controls.fnc_kategori_kontrol(p_kategori_ad);
+    end if;
+    if v_altKategori is null then
+      raise_application_error(-20002,
+                              'Bu kategoriye ait böyle bir alt kategori bulunamadi');
+    else
+      v_altKategori := pkg_controls.fnc_altkategori_kontrol(v_kategoriId,
+                                                            p_ürün.altkategoriId);
+    end if;
+  
+    -- Fiyat Kontrolü
+    IF NOT pkg_controls.fnc_fiyat_aralik_kontrolü(p_ürün.fiyat) THEN
+      raise_application_error(-20001, 'Ürün fiyatini kontrol ediniz');
+    END IF;
+    -- Ürün Ekleme*/
+    INSERT INTO ürünler
+      (kategoriid, ad, fiyat, beden, alt_kategoriid)
+    VALUES
+      (v_kategoriId,
+       (p_ürün.ad),
+       p_ürün.fiyat,
+       UPPER(p_ürün.beden),
+       v_altKategori);
+    commit;
+    dbms_output.put_line('Ürün basariyla eklendi');
+  
+  EXCEPTION
+    WHEN OTHERS THEN
+      -- Hata Mesaji Döndürme
+      RAISE_APPLICATION_ERROR(-20000, 'Bir hata olustu: ' || SQLERRM);
+  END prc_ürün_ekleme;
+  --------------------------------------------------------------------------------------
+  /* Ürünler tablosundan, serviste verilen id ye sahip ürünün silinmesii saglar  */
+  procedure prc_ürün_çikarma(p_urunId number) is
+  begin
+    delete from ürünler ü where ü.id = p_urunid;
+  end prc_ürün_çikarma;
+  -----------------------------------------------------------------------------------
+  /* Sepet tablosunda bulunan verileri ekrana yazdiran servis. Ayni ürünleri tek satirda tutar 
+  birim fiyat ve toplam fiyatini yaninda yazdirir. Ekranin en altinda toplam sepet tutarini kullaniciya
+  gösterir*/
+  procedure prc_sepet_özet IS
+    v_total number;
+  begin
+    for i in (select count(sd.sepet_id) as urunMiktari,
+                     sd.fiyat,
+                     sum(sd.fiyat) as toplamFiyat
+                from sepet_detay sd
+               where sd.sepet_id = (select (max(id) + 1) from sepet)
+               group by sd.fiyat) loop
+      DBMS_OUTPUT.PUT_LINE('Ürün Miktari: ' || i.urunMiktari ||
+                           ', Birim Fiyat: ' || i.fiyat ||
+                           ', Toplam Fiyat: ' || i.toplamFiyat);
+    
+    end loop;
+    select sum(sd.fiyat) into v_total from sepet_detay sd;
+    dbms_output.new_line;
+    dbms_output.put_line('Sepet tutari : ' || v_total);
+  end prc_sepet_özet;
+  -------------------------------------------------------------------------------------
+  /*Servise parametre olarak verilen id ye sahip ürünü , context' te tutulan kullanici id si ile 
+  sepet tablosuna ekleme islemini gerceklestirir */
+  procedure prc_sepet_Ekle(p_urun_id number) is
+    v_countCheck number;
+  begin
+    select count(sd.urun_id)
+      into v_countCheck
+      from sepet_detay sd
+     where sd.sepet_id = (select max(id)+1 from sepet)
+       and sd.urun_id = p_urun_id;
+       dbms_output.put_line(v_countCheck);
+    IF v_countCheck >= 3 then
+      raise_application_error(-20001,
+                              'Sepete ayni üründen 3''ten fazla ekleyemezsiniz');
+    else
+      insert into sepet_detay
+        (sepet_id, urun_id, fiyat)
+      values
+        ((select (max(id) + 1) from sepet),
+         p_urun_id,
+         (select ü.fiyat from ürünler ü where ü.id = p_urun_id));
+    
+    end if;
+  end prc_sepet_Ekle;
+  --------------------------------------------------------
+  /*Servis icerisine verilen id sepette var ise sepet tablosundan cikartilir*/
+  procedure prc_sepet_Cikar(p_urun_id number) is
+    v_countCheck number;
+  begin
+    select count(urun_id)
+      into v_countCheck
+      from sepet_detay
+     where urun_id = p_urun_id;
+    IF v_countCheck <= 0 then
+      raise_application_error(-20001, 'Sepette ürün bulunmamaktadir.');
+    else
+      delete from sepet_detay where urun_id = p_urun_id and rownum=1 and sepet_id = (select max(id)+1 from sepet);
+    end if;
+  end prc_sepet_Cikar;
+
+  ----------------------------------------------------------------
+  /*Sepet tablosundaki ürünleri , fiyat kontrolünü yapip fiyatta bir degisiklik yok ise satinalma tablosuna
+  context icerisinde tutulan kullanici id si ile ekleme yapar. Ayni zamanda satilan her ürünün satisürün tablosunda
+  o ürünün satis adedini 1 arttirir. */
+  procedure prc_sepet_onay is
+    sepet_cur    sys_refcursor;
+    sepet_rec    sepet_detay%rowtype;
+    v_urunid     sepet_detay.urun_id%type;
+    v_fiyat      sepet_detay.fiyat%type;
+    v_urun_fiyat ürünler.fiyat%type;
+    v_nullCheck  number;
+  BEGIN
+   for i in (select distinct(urun_id), sepet_id FROM sepet_detay sd where 
+     sd.sepet_id = (select max(id) + 1 from sepet) ) LOOP
+      v_urunid := i.urun_id;
+      select distinct(sd.fiyat) into v_fiyat from sepet_detay sd where  sd.urun_id = v_urunid;
+      select distinct (fiyat) into v_urun_fiyat from ürünler where id = v_urunid;
+      v_nullCheck := fnc_get_null_check();
+      
+      if v_fiyat = v_urun_fiyat then
+        IF v_nullCheck <= 0 then
+          update müsteri
+             set ilkalisveris = sysdate
+           where id =
+                 (select SYS_CONTEXT('my2_context', 'Sistemdeki Kullanici')
+                    from DUAL);
+        else
+          update müsteri
+             set sonalisveris = sysdate
+           where id =
+                 (select SYS_CONTEXT('my2_context', 'Sistemdeki Kullanici')
+                    from DUAL);
+        end if;
+        open sepet_cur for
+          select * from sepet_detay sd where urun_id = v_urunid;
+        loop
+          fetch sepet_cur
+            into sepet_rec;
+          exit when sepet_cur%notfound;
+          insert into satinalma
+            (musteri_id, urunkod, adet, durum)
+          values
+            ((select SYS_CONTEXT('my2_context', 'Sistemdeki Kullanici')
+               from DUAL),
+             (select ü.kod from ürünler ü where ü.id = v_urunid),
+             1,
+             'ONAYLANDI');
+          pkg_controls.prc_plus_satisurun(v_urunid);
+        end loop;
+        close sepet_cur;
+        dbms_output.put_line('Ürün fiyati uygun:     id=' || v_urunid);
+        dbms_output.put_line('Ürün satin alma basarili     id=' ||
+                             v_urunid);
+        dbms_output.put_line('-------------------------------');
+      else
+        dbms_output.put_line('Ürün fiyati uygun degil:     id=' ||
+                             v_urunid);
+        update sepet_detay
+           set fiyat =
+               (select ü.fiyat from ürünler ü where ü.id = v_urunid)
+         where urun_id = v_urunid;
+        dbms_output.put_line('Ürün fiyati güncellendi:     id=' ||
+                             v_urunid);
+      END IF;
+    END LOOP;
+    insert into sepet
+      (musteri_id, siparis_tarihi)
+    values
+      ((select SYS_CONTEXT('my2_context', 'Sistemdeki Kullanici') FROM DUAL),
+       sysdate);
+  END prc_sepet_onay;
+
+  ------------------------------------------------------------------------------
+  /*Kullanicinin ilk alisverisi mi diye kontrol yapar*/
+  function fnc_get_null_check return number is
+    v_nullCheck number;
+  begin
+    select count(ilkalisveris)
+      into v_nullCheck
+      from müsteri
+     where id = (select SYS_CONTEXT('my2_context', 'Sistemdeki Kullanici')
+                   from dual);
+    return(v_nullCheck);
+  end fnc_get_null_check;
+
+  ---------------------------------------------------------------------------------
+  /*prc_sepet_onay servisinde onaylanan ürünlerin satisürün tablosunda satis miktarini 1 arttirir.*/
+  procedure prc_plus_satisurun(p_id number) is
+    v_check number;
+  begin
+    select count(satis_miktari)
+      into v_check
+      from satisurun
+     where urun_id = p_id;
+    if v_check <= 0 then
+      insert into satisurun
+        (urun_id, satis_miktari, urun_ad)
+      values
+        (p_id, 1, (select ü.ad from ürünler ü where ü.id = p_id));
+    else
+      update satisurun
+         set satis_miktari =
+             ((select sum(satis_miktari) from satisurun where urun_id = p_id) + 1)
+       where urun_id = p_id;
+    end if;
+    commit;
+  end prc_plus_satisurun;
+end PKG_PRODUCT;
