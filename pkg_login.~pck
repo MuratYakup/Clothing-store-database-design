@@ -1,0 +1,148 @@
+create or replace package pkg_login is
+
+  /*
+  -- Author  : Murat Yakup
+  -- Created : 21.03.2023 23:01:04
+  -- Purpose : Bu paket içerisinde , yeni bir müsteri ekleme, müsteri sifresi degistirme,
+              müsterinin sisteme giri?ini ve ç?k???n? sa?layan servislerini bulundurmaktad?r. 
+              Mümkün oldugunca sade hazirlanan bu servislerin detayli aciklamalari üstlerinde belirtilmistir.*/
+
+  type t_müsteri is record(
+    ad           müsteri.ad%type,
+    soyad        müsteri.soyad%type,
+    dogumTarihi  müsteri.dogumtarihi%type,
+    cinsiyet     müsteri.cinsiyet%type,
+    kullaniciAdi müsteri.kullaniciadi%type,
+    sifre        müsteri.sifre%type,
+    telefon      telefonlar.telefonno%type);
+
+  procedure prc_sifre_degistirme(p_kullaniciAdi    Müsteri.kullaniciAdi%TYPE,
+                                 p_eskiSifre       Müsteri.Sifre%TYPE,
+                                 p_yeniSifre       Müsteri.Sifre%TYPE,
+                                 p_yeniSifreTekrar Müsteri.Sifre%TYPE);
+  procedure prc_musteri_login(p_kullaniciAdi varchar2, p_sifre varchar2);
+  procedure prc_musteri_logout;
+  procedure prc_musteri_ekleme(p_müsteri t_müsteri, p_sifreTekrar varchar2);
+
+end pkg_login;
+/
+create or replace package body pkg_login is
+
+  /*Müsteri girisini saglayan bu servis, kullanici adi ve kullanici sifresi parametrelerini kullanicidan istemektedir.
+  kullanicidan aldigi sifreyi hashleyerek , kullanici adinda dogrudan tablodan dogrulugunu kontrol ettikten sonra 
+  'my2_context' inde girisi yapan kullanicinin 'id' sini diger servislerde kullanmak üzere tutar. 
+  Ayni zamanda 'Sistem'  tablosunda bu id yi tutarak giris saatini ve durumunu tutar.*/
+  procedure prc_musteri_login(p_kullaniciAdi varchar2, p_sifre varchar2) as
+    v_kullaniciAdi varchar2(20);
+    v_sifre        varchar2(200);
+    v_sifreKontrol varchar2(200);
+    v_girisId      number(10);
+    v_customer_id  müsteri.id%TYPE;
+  begin
+    v_sifreKontrol := (pkg_controls.fnc_sifre_hash(p_sifre));
+    select m.id, m.kullaniciAdi, m.sifre
+      into v_girisId, v_kullaniciAdi, v_sifre
+      from Müsteri m
+     where m.kullaniciAdi = p_kullaniciAdi
+       and m.sifre = v_sifreKontrol;
+    /* Sistemde kullanici olup olmadigi sys_control servisiyle saglaniyor */
+    if (pkg_controls.fnc_sys_control) then
+     /*Sistemde kullanici yok ise 'kullaniciAdi' den o kullanici adina sahip id yi context te tutuyor*/
+      select m.id
+        into v_customer_id
+        from Müsteri m
+       where m.KULLANICIADI = p_kullaniciAdi;
+      DBMS_SESSION.set_CONTEXT('my2_context',
+                               'Sistemdeki Kullanici',
+                               v_customer_id);
+      insert into Sistem
+        (musteri_id, durum, giris_tarih)
+      values
+        (v_customer_id, 'Aktif', sysdate);
+    
+      commit;
+      raise_application_error(-20002, 'Giris Basarili');
+    else
+      raise_application_error(-20003,
+                              'Sistemde kullanici mevcut oldugundan giris yapilamadi');
+    end if;
+  
+  exception
+    when no_data_found then
+      raise_application_error(-20001,
+                              'Kullanici adinizi veya sifrenizi kontrol ediniz');
+  end prc_musteri_login;
+  --------------------------------------------------------------------------------------------------------------
+  /*Müsterinin sistemden cikisini saglayan bu servis, 'my2_context' te tutulan id yi temizler ve 'sistem' tablosunda
+  cikis saatini ve durumunu günceller. */
+  procedure prc_musteri_logout is
+  begin
+    DBMS_SESSION.CLEAR_context('my2_context');
+    update Sistem
+       set durum = 'Pasif', cikis_tarih = sysdate
+     where sistem.durum = 'Aktif';
+    commit;
+    dbms_output.put_line('Sistemden cikis basarili');
+  end prc_musteri_logout;
+
+  --------------------------------------------------------------------------------------------------------------
+  procedure prc_musteri_ekleme(p_müsteri t_müsteri, p_sifreTekrar varchar2) AS
+  begin
+    /*Kullanici tarafindan alinan parametrelerin kontrolleri yapiliyor*/ 
+    if (pkg_controls.fnc_parametre_kontrol(p_müsteri, p_sifreTekrar)) = true then
+      insert into Müsteri
+        (Ad, Soyad, dogumTarihi, Cinsiyet, kullaniciAdi, Sifre)
+      values
+        (p_müsteri.ad,
+         p_müsteri.soyad,
+         p_müsteri.dogumTarihi,
+         p_müsteri.cinsiyet,
+         p_müsteri.kullaniciAdi,
+         (pkg_controls.fnc_sifre_hash(p_müsteri.sifre))); /*Sifre hashleme islemi Controls paketindeki function ile
+                                                                        gerçeklestiriliyor.*/
+    
+      dbms_output.put_line('müsteri Eklendi');
+      --Controls paketindeki procedure ile telefon numarasi istenilen formata çevriliyor.
+      pkg_controls.prc_telefon_düzen(p_telNo        => p_müsteri.telefon,
+                                 p_kullaniciAdi => p_müsteri.kullaniciAdi);
+    else
+      RAISE_APPLICATION_ERROR(-20001,
+                              'Müsteri Eklenmedi. Lütfen girdiginiz bilgileri kontrol ediniz.');
+    end if;
+  end prc_musteri_ekleme;
+  -----------------------------------------------------------------------------------------------------------------
+   /* Kullanicidan istenen parametrelerin uyumasi halinde sistemdeki Müsteri tablosundaki o kullaniciya ait
+     sifrenin degistirilmesini saglar. */
+   procedure prc_sifre_Degistirme(p_kullaniciAdi    Müsteri.kullaniciAdi%TYPE,
+                             p_eskiSifre       Müsteri.Sifre%TYPE,
+                             p_yeniSifre       Müsteri.Sifre%TYPE,
+                             p_yeniSifreTekrar Müsteri.Sifre%TYPE) is
+    v_musteriid Number;
+    v_eskisifre varchar2(200);
+  begin
+    select m.id, m.sifre
+      into v_musteriid, v_eskisifre
+      from Müsteri m
+     where m.kullaniciadi = p_kullaniciAdi;
+    if v_musteriid is null then
+      raise_application_error(-20001, 'Kullanici Adi Bulunamadi');
+    elsif pkg_controls.fnc_sifre_hash(p_eskiSifre) <> v_eskisifre then
+      raise_application_error(-20002, 'Eski sifre dogru degil');
+    elsif p_yeniSifre != p_yeniSifreTekrar then
+      raise_application_error(-20003, 'Yeni sifre, tekrari ile uyusmuyor');
+    else
+      update Müsteri
+         set sifre =
+             (pkg_controls.fnc_sifre_hash(p_yeniSifre))
+       where müsteri.kullaniciAdi = p_kullaniciAdi;
+       dbms_output.put_line('Sifre Degistirme Basarili');
+    end if;
+  exception
+    when no_data_found then
+      raise_application_error(-20004,
+                              'Kullanici Adi Bulunamadi');
+                              when others then
+      raise_application_error(-20000 , 'Hata ile karsilasildi : ' || SQLERRM ); 
+  end prc_sifre_Degistirme;
+end pkg_login;
+/
